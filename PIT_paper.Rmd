@@ -1,0 +1,136 @@
+---
+title: "Investigation of Decomp.RSSD through PIT residuals"
+output: html_document
+date: "2024-05-17"
+---
+
+```{r setup, include=FALSE}
+library(FNN)
+library(ggplot2)
+library(patchwork)
+library(tidyr)
+library(purrr)
+library(Robyn)
+library(nortest)
+# import the data from robyn
+temp = read.csv("pareto_alldecomp_matrix.csv")
+pareto_models <- read.csv("pareto_hyperparameters.csv")
+str(pareto_models)
+```
+
+## R Markdown
+
+Robyn utilises a multi-objective optimization algorithm(nevergrad) that simultaneously minimizes the Normalized Mean Squared Error (NMSE) and the Business Error, leveraging the Decomposed Residual Sum of Squares approach. This report examines the predictions at both the optimal and worst points of the decomposed sum of squared business errors on the Pareto frontier. 
+
+We evaluate their optimality by analyzing the PIT residuals and their Kullback-Leibler divergence from the theoretical distribution. Thus, in this report, the Best model corresponds to the Model with the Best business error while being at the pareto frontier, and the Worst model corresponds to the Worst Business error, while still being on the pareto frontier.
+
+```{r choice}
+#get the best and the worst models
+sorted_modesl = pareto_models[order(pareto_models$decomp.rssd), ]
+best_model = sorted_modesl[1,]
+print(best_model$solID)
+worst_model = sorted_modesl[dim(sorted_modesl)[1],]
+print(worst_model$solID)
+#get the true values
+true_vals = dt_simulated_weekly[7:(157+6),]$revenue
+##choose the best and the worst models from the rest
+worst_model_fits = temp[which(temp$solID == worst_model$solID),]
+best_model_fits = temp[which(temp$solID == best_model$solID),]
+```
+
+## Results
+
+### QQplot after pit for goodness of fit
+
+```{r}
+pit_transform <- function(data) {
+  ecdf_func <- ecdf(data$x)
+  return(ecdf_func(data$x))
+}
+plot_pit <- function(df, model_name) {
+  # Create a histogram of PIT values
+  g <- ggplot(df, aes(x = PIT)) +
+    geom_histogram(aes(y = ..density..), bins = 30, fill = "blue", color = "black", alpha = 0.7) +
+    geom_density(color = "red", size = 1) +
+    ggtitle(paste("Histogram of PIT Values for", model_name)) +
+    xlab("PIT Value") +
+    ylab("Density") +
+    theme_minimal()
+
+  
+  # QQ plot against uniform distribution
+  qq_plot <- qqplot(qunif(ppoints(nrow(df))), df$PIT, main = paste("QQ Plot of PIT Values for", model_name),
+                    xlab = "Theoretical Quantiles", ylab = "Sample Quantiles", pch = 19, col = "blue")
+  abline(0, 1, col = "red")
+  
+  list(hist = g, qq = qq_plot)
+}
+perform_tests <- function(x,pit_values) {
+  ks_test <- ks.test(pit_values, "punif")
+  ad_test <- ad.test(x)
+  list(ks = ks_test, ad = ad_test)
+}
+mod_pit = function(fitted, true){
+df_temo = rep(0, length(fitted))
+for(i in 1:length(fitted)){
+df_temo[i] = pnorm(true[i], mean = fitted[i], sd = sd(fitted - true))
+}
+return(df_temo)
+}
+
+df1 <- data.frame(x = best_model_fits$depVarHat)
+df1$PIT <- mod_pit(best_model_fits$depVarHat, true_vals)
+
+df2 <- data.frame(x = worst_model_fits$depVarHat)
+df2$PIT <- mod_pit(worst_model_fits$depVarHat, true_vals)
+
+plots_df1 <- plot_pit(df1, "Best Model")
+plots_df2 <- plot_pit(df2, "Worst Model")
+
+print(plots_df1$hist)
+print(plots_df1$qq)
+print(plots_df2$hist)
+print(plots_df2$qq)
+
+tests_df1 <- perform_tests(df1$x, df1$PIT)
+tests_df2 <- perform_tests(df2$x, df2$PIT)
+
+print(tests_df1)
+print(tests_df2)
+
+```
+
+### Get KL Divergence
+
+```{r}
+set.seed(0)
+uniform_rvs = runif( length(df1$PIT))
+k = 50
+data_set = cbind.data.frame(
+  1:k,
+KL.divergence(df1$PIT, uniform_rvs, k = k),
+KL.divergence(df2$PIT, uniform_rvs, k = k)
+)
+colnames(data_set) = c('X', 'Best', 'Worst')
+data_set = pivot_longer(data_set, cols = c('Best', 'Worst'))
+colnames(data_set) = c('X', 'Model', 'KL_div')
+
+plot1 = ggplot(data = data_set) +
+  geom_smooth(mapping = aes(x = X, y = KL_div, colour = Model))+
+  geom_point(mapping = aes(x = X, y = KL_div, colour = Model))+
+  labs(x = "Number of neighbours considered", y = "KL Divergence", title = "KL Divergence of Best and Worst Model Fits(Theoretical dist as reference)") 
+data_set = cbind.data.frame(
+  1:k,
+KL.divergence(uniform_rvs, df1$PIT,  k = k),
+KL.divergence(uniform_rvs, df2$PIT,  k = k)
+)
+colnames(data_set) = c('X', 'Best', 'Worst')
+data_set = pivot_longer(data_set, cols = c('Best', 'Worst'))
+colnames(data_set) = c('X', 'Model', 'KL_div')
+
+plot2 = ggplot(data = data_set) +
+  geom_smooth(mapping = aes(x = X, y = KL_div, colour = Model))+
+  geom_point(mapping = aes(x = X, y = KL_div, colour = Model))+
+  labs(x = "Number of neighbours considered", y = "KL Divergence", title = "KL Divergence of Best and Worst Model Fits(Theoretical dist as target)") 
+plot1 / plot2
+```
